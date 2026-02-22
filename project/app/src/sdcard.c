@@ -7,9 +7,8 @@
 LOG_MODULE_REGISTER(sdcard, CONFIG_APP_LOG_LEVEL);
 
 #define MAX_WAV_FILES 100
-#define MAX_PATH_LEN  64
 
-static char wav_files[MAX_WAV_FILES][MAX_PATH_LEN];
+static struct sdcard_wav_info wav_infos[MAX_WAV_FILES];
 static int wav_file_count;
 
 #define AUTOMOUNT_NODE DT_NODELABEL(ffs1)
@@ -45,13 +44,6 @@ struct wav_data {
 	uint32_t size;
 };
 
-struct wav_info {
-	uint32_t samplerate;
-	uint16_t channels;
-	uint16_t bitdepth;
-	uint32_t nframes;
-};
-
 static bool has_wav_ext(const char *name)
 {
 	size_t len = strlen(name);
@@ -65,7 +57,7 @@ static bool has_wav_ext(const char *name)
 	       (ext[3] == 'v' || ext[3] == 'V');
 }
 
-static int read_wav_header(const char *path, struct wav_info *info)
+static int read_wav_header(const char *path, struct sdcard_wav_info *info)
 {
 	struct fs_file_t f;
 	struct wav_file file;
@@ -113,9 +105,12 @@ static int read_wav_header(const char *path, struct wav_info *info)
 	}
 
 	info->samplerate = fmt.samplerate;
-	info->channels = fmt.channels;
-	info->bitdepth = fmt.bitdepth;
-	info->nframes = data.size / fmt.framesize;
+	info->channels   = fmt.channels;
+	info->bitdepth   = fmt.bitdepth;
+	info->framesize  = fmt.framesize;
+	info->data_size  = data.size;
+	info->nframes    = data.size / fmt.framesize;
+	info->data_start = fs_tell(&f);
 
 	fs_close(&f);
 	return 0;
@@ -149,23 +144,25 @@ static void enumerate_wav_files(const char *path)
 
 		snprintf(filepath, sizeof(filepath), "%s/%s", path, entry.name);
 
-		struct wav_info info;
-		if (read_wav_header(filepath, &info) == 0) {
-			uint32_t duration_s = info.nframes / info.samplerate;
+		if (wav_file_count >= MAX_WAV_FILES) {
+			LOG_WRN("Too many WAV files, ignoring %s", entry.name);
+			continue;
+		}
+
+		struct sdcard_wav_info *info = &wav_infos[wav_file_count];
+		strncpy(info->path, filepath, sizeof(info->path) - 1);
+		info->path[sizeof(info->path) - 1] = '\0';
+
+		if (read_wav_header(filepath, info) == 0) {
+			uint32_t duration_s = info->nframes / info->samplerate;
 			LOG_INF("%s: %u Hz, %u ch, %u bit, %u:%02u",
 				entry.name,
-				info.samplerate,
-				info.channels,
-				info.bitdepth,
+				info->samplerate,
+				info->channels,
+				info->bitdepth,
 				duration_s / 60,
 				duration_s % 60);
-
-			if (wav_file_count < MAX_WAV_FILES) {
-				strncpy(wav_files[wav_file_count], filepath,
-					MAX_PATH_LEN - 1);
-				wav_files[wav_file_count][MAX_PATH_LEN - 1] = '\0';
-				wav_file_count++;
-			}
+			wav_file_count++;
 		} else {
 			LOG_WRN("%s: failed to parse WAV header", entry.name);
 		}
@@ -173,16 +170,15 @@ static void enumerate_wav_files(const char *path)
 
 	fs_closedir(&dir);
 
-	/* Sort alphabetically */
+	/* Sort alphabetically by path */
 	for (int i = 1; i < wav_file_count; i++) {
-		char tmp[MAX_PATH_LEN];
-		memcpy(tmp, wav_files[i], MAX_PATH_LEN);
+		struct sdcard_wav_info tmp = wav_infos[i];
 		int j = i - 1;
-		while (j >= 0 && strcmp(wav_files[j], tmp) > 0) {
-			memcpy(wav_files[j + 1], wav_files[j], MAX_PATH_LEN);
+		while (j >= 0 && strcmp(wav_infos[j].path, tmp.path) > 0) {
+			wav_infos[j + 1] = wav_infos[j];
 			j--;
 		}
-		memcpy(wav_files[j + 1], tmp, MAX_PATH_LEN);
+		wav_infos[j + 1] = tmp;
 	}
 }
 
@@ -209,10 +205,10 @@ int sdcard_get_wav_count(void)
 	return wav_file_count;
 }
 
-const char *sdcard_get_wav_path(int index)
+const struct sdcard_wav_info *sdcard_get_wav_info(int index)
 {
 	if (index < 0 || index >= wav_file_count) {
 		return NULL;
 	}
-	return wav_files[index];
+	return &wav_infos[index];
 }

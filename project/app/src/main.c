@@ -17,7 +17,7 @@ int main(void)
 
 	int file_count = sdcard_get_wav_count();
 	if (file_count > 0) {
-		audio_set_file(sdcard_get_wav_path(0));
+		audio_set_file(sdcard_get_wav_info(0));
 	}
 
 	const struct device *const dev = DEVICE_DT_GET(DT_ALIAS(qdec0));
@@ -54,9 +54,9 @@ int main(void)
 		position = (ENC_STEP_COUNT - position) % ENC_STEP_COUNT;
 		if (position != last_position) {
 			int i = position % file_count;
-			LOG_INF("position %d, File %d: %s", position, i,
-				sdcard_get_wav_path(i));
-			audio_set_file(sdcard_get_wav_path(i));
+			const struct sdcard_wav_info *info = sdcard_get_wav_info(i);
+			LOG_INF("position %d, File %d: %s", position, i, info->path);
+			audio_set_file(info);
 			last_position = position;
 		}
 	}

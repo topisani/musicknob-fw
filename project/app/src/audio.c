@@ -28,7 +28,7 @@ static struct adc_sequence adc_seq = {
 };
 
 /* Inter-thread communication */
-static const char *volatile pending_path;
+static const struct sdcard_wav_info *volatile pending_info;
 static struct k_sem file_change_sem;
 
 /* Thread state */
@@ -42,37 +42,8 @@ static uint16_t out_framesize; /* wav_channels * 4 */
 static uint32_t nframes;
 static uint64_t global_frame_counter;
 static bool i2s_started;
+static bool i2s_configured;
 static bool file_open;
-
-struct wav_file_hdr {
-	uint32_t type_id;
-	uint32_t size;
-	uint32_t fmt_id;
-};
-
-struct wav_fmt {
-	uint32_t id;
-	uint32_t size;
-	uint16_t fmt;
-	uint16_t channels;
-	uint32_t samplerate;
-	uint32_t byterate;
-	uint16_t framesize;
-	uint16_t bitdepth;
-};
-
-struct wav_data_hdr {
-	uint32_t id;
-	uint32_t size;
-};
-
-#define WAV_ID(s) \
-	(uint32_t)((s)[0] | ((s)[1] << 8) | ((s)[2] << 16) | ((s)[3] << 24))
-
-#define WAV_RIFF_ID WAV_ID("RIFF")
-#define WAV_WAVE_ID WAV_ID("WAVE")
-#define WAV_FMT_ID  WAV_ID("fmt ")
-#define WAV_DATA_ID WAV_ID("data")
 
 static int configure_i2s(uint32_t samplerate, uint16_t bitdepth, uint16_t channels)
 {
@@ -90,83 +61,42 @@ static int configure_i2s(uint32_t samplerate, uint16_t bitdepth, uint16_t channe
 	return i2s_configure(i2s_dev, I2S_DIR_TX, &cfg);
 }
 
-static int open_wav(const char *path)
+static int open_wav(const struct sdcard_wav_info *info)
 {
-	struct wav_file_hdr hdr;
-	struct wav_fmt fmt;
-	struct wav_data_hdr dhdr;
-	int rc;
-
 	if (file_open) {
 		fs_close(&cur_file);
 		file_open = false;
 	}
 
 	fs_file_t_init(&cur_file);
-	rc = fs_open(&cur_file, path, FS_O_READ);
+	int rc = fs_open(&cur_file, info->path, FS_O_READ);
 	if (rc < 0) {
-		LOG_ERR("Failed to open %s: %d", path, rc);
+		LOG_ERR("Failed to open %s: %d", info->path, rc);
 		return rc;
 	}
 	file_open = true;
 
-	rc = fs_read(&cur_file, &hdr, sizeof(hdr));
-	if (rc < (int)sizeof(hdr) ||
-	    hdr.type_id != WAV_RIFF_ID || hdr.fmt_id != WAV_WAVE_ID) {
-		LOG_ERR("Invalid WAV file");
-		return -EINVAL;
-	}
-
-	rc = fs_read(&cur_file, &fmt, sizeof(fmt));
-	if (rc < (int)sizeof(fmt) || fmt.id != WAV_FMT_ID) {
-		LOG_ERR("Invalid fmt chunk");
-		return -EINVAL;
-	}
-
-	if (fmt.fmt != 1) {
-		LOG_ERR("Only PCM format supported (got %u)", fmt.fmt);
-		return -ENOTSUP;
-	}
-
-	/* Skip extra format bytes */
-	if (fmt.size > sizeof(fmt) - 8) {
-		fs_seek(&cur_file, fmt.size - (sizeof(fmt) - 8), FS_SEEK_CUR);
-	}
-
-	/* Find data chunk */
-	while (true) {
-		rc = fs_read(&cur_file, &dhdr, sizeof(dhdr));
-		if (rc < (int)sizeof(dhdr)) {
-			LOG_ERR("Data chunk not found");
-			return -EINVAL;
-		}
-		if (dhdr.id == WAV_DATA_ID) {
-			break;
-		}
-		fs_seek(&cur_file, dhdr.size, FS_SEEK_CUR);
-	}
-
-	framesize = fmt.framesize;
-	wav_bitdepth = fmt.bitdepth;
-	wav_channels = fmt.channels;
-	out_framesize = fmt.channels * 4;
-	data_size = dhdr.size;
-	nframes = data_size / framesize;
-	data_start = fs_tell(&cur_file);
+	/* Use cached metadata — no header parsing */
+	framesize     = info->framesize;
+	wav_bitdepth  = info->bitdepth;
+	wav_channels  = info->channels;
+	out_framesize = info->channels * 4;
+	data_size     = info->data_size;
+	nframes       = info->nframes;
+	data_start    = info->data_start;
 
 	LOG_INF("Opened %s: %u Hz, %u ch, %u bit, %u frames",
-		path, fmt.samplerate, fmt.channels, fmt.bitdepth, nframes);
+		info->path, info->samplerate, info->channels, info->bitdepth, nframes);
 
-	/* Configure I2S on first file */
-	if (!i2s_started) {
-		rc = configure_i2s(fmt.samplerate, 32, fmt.channels);
+	if (!i2s_configured) {
+		rc = configure_i2s(info->samplerate, 32, info->channels);
 		if (rc < 0) {
 			LOG_ERR("I2S configure failed: %d", rc);
 			return rc;
 		}
+		i2s_configured = true;
 	}
 
-	/* Seek to position matching global counter */
 	if (nframes > 0) {
 		uint32_t frame_offset = global_frame_counter % nframes;
 		fs_seek(&cur_file, data_start + frame_offset * framesize, FS_SEEK_SET);
@@ -254,10 +184,10 @@ static void audio_thread_fn(void *p1, void *p2, void *p3)
 	/* Wait for first file */
 	k_sem_take(&file_change_sem, K_FOREVER);
 
-	const char *path = pending_path;
-	pending_path = NULL;
+	const struct sdcard_wav_info *info = pending_info;
+	pending_info = NULL;
 
-	if (open_wav(path) < 0) {
+	if (open_wav(info) < 0) {
 		LOG_ERR("Failed to open initial file");
 		return;
 	}
@@ -267,11 +197,11 @@ static void audio_thread_fn(void *p1, void *p2, void *p3)
 	while (true) {
 		/* Check for file change (non-blocking) */
 		if (k_sem_take(&file_change_sem, K_NO_WAIT) == 0) {
-			path = pending_path;
-			pending_path = NULL;
-			if (open_wav(path) < 0) {
-				LOG_ERR("Failed to switch file");
-				return;
+			info = pending_info;
+			pending_info = NULL;
+			if (open_wav(info) < 0) {
+				LOG_ERR("Failed to switch file, continuing");
+				/* continue with old file still open */
 			}
 		}
 
@@ -290,7 +220,7 @@ static void audio_thread_fn(void *p1, void *p2, void *p3)
 		if (rc < 0) {
 			k_mem_slab_free(&i2s_mem_slab, buf);
 			LOG_ERR("Read failed: %d", rc);
-			return;
+			continue;
 		}
 
 		expand_and_apply_volume(buf, frames, volume);
@@ -298,8 +228,12 @@ static void audio_thread_fn(void *p1, void *p2, void *p3)
 		rc = i2s_write(i2s_dev, buf, BLOCK_SIZE);
 		if (rc < 0) {
 			k_mem_slab_free(&i2s_mem_slab, buf);
-			LOG_ERR("I2S write failed: %d", rc);
-			return;
+			LOG_WRN("I2S write failed (%d), recovering", rc);
+			i2s_trigger(i2s_dev, I2S_DIR_TX, I2S_TRIGGER_DROP);
+			i2s_trigger(i2s_dev, I2S_DIR_TX, I2S_TRIGGER_PREPARE);
+			i2s_started = false;
+			queued = 0;
+			continue;
 		}
 
 		global_frame_counter += frames;
@@ -352,9 +286,9 @@ int audio_init(void)
 	return 0;
 }
 
-int audio_set_file(const char *path)
+int audio_set_file(const struct sdcard_wav_info *info)
 {
-	pending_path = path;
+	pending_info = info;
 	k_sem_give(&file_change_sem);
 	return 0;
 }
