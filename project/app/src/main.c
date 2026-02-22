@@ -8,20 +8,28 @@
 
 LOG_MODULE_REGISTER(app, CONFIG_APP_LOG_LEVEL);
 
-static void qdec_loop(void)
+#define ENC_STEP_COUNT 100
+
+int main(void)
 {
+	sdcard_init();
+	audio_init();
+
+	int file_count = sdcard_get_wav_count();
+	if (file_count > 0) {
+		audio_set_file(sdcard_get_wav_path(0));
+	}
+
 	const struct device *const dev = DEVICE_DT_GET(DT_ALIAS(qdec0));
 	struct sensor_value val;
 	int rc;
 
 	if (!device_is_ready(dev)) {
 		LOG_INF("Qdec device is not ready");
-		return;
+		return 0;
 	}
 
-	LOG_INF("Quadrature decoder sensor test");
-
-	int last_position = -1;
+	int last_position = 0;
 
 	while (true) {
 		k_msleep(10);
@@ -29,29 +37,29 @@ static void qdec_loop(void)
 		rc = sensor_sample_fetch(dev);
 		if (rc != 0) {
 			LOG_INF("Failed to fetch sample (%d)", rc);
-			return;
+			return 0;
 		}
 
 		rc = sensor_channel_get(dev, SENSOR_CHAN_ROTATION, &val);
 		if (rc != 0) {
 			LOG_INF("Failed to get data (%d)", rc);
-			return;
+			return 0;
 		}
 
-		int position = (((val.val1 / 2) % 100) + 100) % 100;
+		if (file_count <= 0) {
+			continue;
+		}
+
+		int position = (((val.val1 / 2) % ENC_STEP_COUNT) + ENC_STEP_COUNT) % ENC_STEP_COUNT;
+		position = (ENC_STEP_COUNT - position) % ENC_STEP_COUNT;
 		if (position != last_position) {
-			LOG_INF("Position = %d", position);
+			int i = position % file_count;
+			LOG_INF("position %d, File %d: %s", position, i,
+				sdcard_get_wav_path(i));
+			audio_set_file(sdcard_get_wav_path(i));
 			last_position = position;
 		}
 	}
-}
 
-int main(void)
-{
-	sdcard_init();
-	audio_init();
-	// audio_play_test_tone();
-	audio_play_wav("/SD:/01.wav");
-	qdec_loop();
 	return 0;
 }

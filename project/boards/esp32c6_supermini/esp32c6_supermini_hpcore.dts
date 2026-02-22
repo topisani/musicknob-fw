@@ -27,6 +27,10 @@
 	aliases {
 		watchdog0 = &wdt0;
 	};
+
+	zephyr,user {
+		io-channels = <&adc0 6>;
+	};
 };
 
 &uart0 {
@@ -83,4 +87,18 @@
 
 &dma {
 	status = "okay";
+};
+
+&adc0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@6 {
+		reg = <6>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
 };
