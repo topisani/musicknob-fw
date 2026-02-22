@@ -9,7 +9,6 @@
 #include <espressif/esp32c6/esp32c6_wroom_n4.dtsi>
 #include "esp32c6_supermini_hpcore-pinctrl.dtsi"
 #include <zephyr/dt-bindings/input/input-event-codes.h>
-#include <zephyr/dt-bindings/led/led.h>
 #include <espressif/partitions_0x0_default.dtsi>
 
 / {
@@ -27,19 +26,6 @@
 
 	aliases {
 		watchdog0 = &wdt0;
-		i2c-0 = &i2c0;
-		sw0 = &button0;
-		rgb0 = &rgb_led;
-	};
-
-	buttons {
-		compatible = "gpio-keys";
-
-		button0: button_0 {
-			gpios = <&gpio0 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "BOOT Button";
-			zephyr,code = <INPUT_KEY_0>;
-		};
 	};
 };
 
@@ -55,10 +41,7 @@
 };
 
 &i2c0 {
-	status = "okay";
-	clock-frequency = <I2C_BITRATE_FAST>;
-	pinctrl-0 = <&i2c0_default>;
-	pinctrl-names = "default";
+	status = "disabled";
 };
 
 &i2s {
@@ -68,17 +51,6 @@
 
 	dmas = <&dma 3>;
 	dma-names = "tx";
-
-	rgb_led: ws2812@0 {
-		compatible = "worldsemi,ws2812-i2s";
-
-		reg = <0>;
-		chain-length = <1>;
-		color-mapping = <LED_COLOR_ID_GREEN
-				 LED_COLOR_ID_RED
-				 LED_COLOR_ID_BLUE>;
-		reset-delay = <500>;
-	};
 };
 
 &spi2 {

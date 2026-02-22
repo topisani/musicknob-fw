@@ -4,6 +4,7 @@
 #include <zephyr/drivers/sensor.h>
 
 #include "sdcard.h"
+#include "audio.h"
 
 LOG_MODULE_REGISTER(app, CONFIG_APP_LOG_LEVEL);
 
@@ -48,6 +49,9 @@ static void qdec_loop(void)
 int main(void)
 {
 	sdcard_init();
+	audio_init();
+	// audio_play_test_tone();
+	audio_play_wav("/SD:/01.wav");
 	qdec_loop();
 	return 0;
 }
