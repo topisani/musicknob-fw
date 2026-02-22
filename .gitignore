@@ -1,0 +1,24 @@
+# editors
+.vscode
+*.swp
+*~
+.cache/
+
+# python
+.venv
+
+# build
+/build*
+/twister-out*
+
+__pycache__/
+
+# west
+/deps
+/.west
+
+# docs
+/doc/_build*
+compile_commands.json
+.gdb_history
+.env

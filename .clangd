@@ -1,0 +1,14 @@
+CompileFlags:
+  Add: [-ferror-limit=0]
+  Remove: [
+    -fno-printf-return-value,
+    -mfp16-format=*,
+    -fno-reorder-functions,
+    -fno-freestanding,
+    -fstrict-volatile-bitfields,
+  ]
+---
+If:
+  PathMatch: project/app/m4/.*
+CompileFlags:
+  CompilationDatabase: build/app_m4/
