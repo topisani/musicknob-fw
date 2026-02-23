@@ -2,7 +2,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2s.h>
-#include <zephyr/drivers/adc.h>
 #include <zephyr/fs/fs.h>
 #include <string.h>
 
@@ -20,12 +19,8 @@ K_MEM_SLAB_DEFINE(i2s_mem_slab, BLOCK_SIZE, BLOCK_COUNT, 4);
 
 static const struct device *i2s_dev = DEVICE_DT_GET(DT_NODELABEL(i2s));
 
-static const struct adc_dt_spec volume_adc = ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 0);
-static int16_t adc_raw_buf;
-static struct adc_sequence adc_seq = {
-	.buffer = &adc_raw_buf,
-	.buffer_size = sizeof(adc_raw_buf),
-};
+/* Volume: written from main thread, read from audio thread */
+static volatile uint16_t current_volume_q8 = 256; /* default full volume */
 
 /* Inter-thread communication */
 static const struct sdcard_wav_info *volatile pending_info;
@@ -128,16 +123,6 @@ static int read_looping(void *buf, size_t len)
 	return filled;
 }
 
-static uint16_t read_volume_q8(void)
-{
-	int rc = adc_read_dt(&volume_adc, &adc_seq);
-	if (rc < 0) {
-		return 256; /* full volume on error */
-	}
-	int32_t val = CLAMP((int32_t)adc_raw_buf, 0, 4095);
-	return (uint16_t)((val * 256) / 4095);
-}
-
 static void expand_and_apply_volume(void *buf, uint32_t frames, uint16_t volume_q8)
 {
 	uint8_t *raw = (uint8_t *)buf;
@@ -214,7 +199,7 @@ static void audio_thread_fn(void *p1, void *p2, void *p3)
 
 		uint32_t frames = BLOCK_SIZE / out_framesize;
 		uint32_t raw_bytes = frames * framesize;
-		uint16_t volume = read_volume_q8();
+		uint16_t volume = current_volume_q8;
 
 		rc = read_looping(buf, raw_bytes);
 		if (rc < 0) {
@@ -261,19 +246,6 @@ int audio_init(void)
 		return -ENODEV;
 	}
 
-	if (!adc_is_ready_dt(&volume_adc)) {
-		LOG_ERR("ADC not ready");
-		return -ENODEV;
-	}
-
-	int rc = adc_channel_setup_dt(&volume_adc);
-	if (rc < 0) {
-		LOG_ERR("ADC channel setup failed: %d", rc);
-		return rc;
-	}
-
-	adc_sequence_init_dt(&volume_adc, &adc_seq);
-
 	k_sem_init(&file_change_sem, 0, 1);
 
 	k_thread_create(&audio_thread_data, audio_thread_stack,
@@ -291,4 +263,9 @@ int audio_set_file(const struct sdcard_wav_info *info)
 	pending_info = info;
 	k_sem_give(&file_change_sem);
 	return 0;
+}
+
+void audio_set_volume(uint16_t volume_q8)
+{
+	current_volume_q8 = volume_q8;
 }
