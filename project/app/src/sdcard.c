@@ -1,6 +1,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/fs/fs.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "sdcard.h"
 
@@ -154,7 +155,7 @@ static void enumerate_mp3_files(const char *path)
 {
 	struct fs_dir_t dir;
 	struct fs_dirent entry;
-	char filepath[64];
+	char filepath[256];
 
 	fs_dir_t_init(&dir);
 	if (fs_opendir(&dir, path) < 0) {
@@ -194,6 +195,7 @@ static void enumerate_mp3_files(const char *path)
 				duration_s % 60);
 			audio_file_count++;
 		} else {
+			audio_file_count++;
 			LOG_WRN("%s: failed to parse MP3 header", entry.name);
 		}
 	}

@@ -3,7 +3,7 @@
 #include <zephyr/fs/fs.h>
 
 struct sdcard_audio_info {
-	char     path[64];
+	char     path[256];
 	uint32_t samplerate;
 	uint16_t channels;
 	uint32_t total_samples;   /* total PCM samples (for modulo seeking) */

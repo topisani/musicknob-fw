@@ -6,6 +6,7 @@
 
 #include "sdcard.h"
 #include "audio.h"
+#include "zephyr/sys/util.h"
 
 LOG_MODULE_REGISTER(app, CONFIG_APP_LOG_LEVEL);
 
@@ -30,13 +31,12 @@ static uint16_t read_volume_q8(void)
 
 int main(void)
 {
+
+	LOG_INF("Hello world");
 	sdcard_init();
 	audio_init();
 
 	int file_count = sdcard_get_audio_count();
-	if (file_count > 0) {
-		audio_set_file(sdcard_get_audio_info(0));
-	}
 
 	if (!adc_is_ready_dt(&volume_adc)) {
 		LOG_ERR("ADC not ready");
@@ -59,10 +59,10 @@ int main(void)
 		return 0;
 	}
 
-	int last_position = 0;
+	int last_position =  -1;
 
 	while (true) {
-
+		k_msleep(10);
 		audio_set_volume(read_volume_q8());
 
 		rc = sensor_sample_fetch(dev);
@@ -81,8 +81,9 @@ int main(void)
 			continue;
 		}
 
-		int position = (((val.val1 / 2) % ENC_STEP_COUNT) + ENC_STEP_COUNT) % ENC_STEP_COUNT;
-		position = (ENC_STEP_COUNT - position) % ENC_STEP_COUNT;
+		int position =
+			(((val.val1 / 2) % ENC_STEP_COUNT) + ENC_STEP_COUNT) % ENC_STEP_COUNT;
+		// position = (ENC_STEP_COUNT - position) % ENC_STEP_COUNT;
 		if (position != last_position) {
 			int i = position % file_count;
 			const struct sdcard_audio_info *info = sdcard_get_audio_info(i);
@@ -90,7 +91,6 @@ int main(void)
 			audio_set_file(info);
 			last_position = position;
 		}
-		k_msleep(10);
 	}
 
 	return 0;

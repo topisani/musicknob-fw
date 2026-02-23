@@ -24,7 +24,7 @@ LOG_MODULE_REGISTER(audio, CONFIG_APP_LOG_LEVEL);
 #define PREQUEUE_BLOCKS   2
 
 /* MP3 input buffer: large enough to hold >1 full frame (max ~1441 bytes) */
-#define MP3_BUF_SIZE    8192
+#define MP3_BUF_SIZE    4096
 /* PCM decode buffer: one MPEG1 stereo frame = 1152 samples × 2 channels */
 #define PCM_BUF_SAMPLES (2304)
 /* PCM pipe: stream of interleaved stereo int16_t pairs, ~4 frames of headroom */
@@ -36,7 +36,7 @@ K_PIPE_DEFINE(pcm_pipe, PCM_PIPE_SIZE, 4);
 static const struct device *i2s_dev = DEVICE_DT_GET(DT_NODELABEL(i2s));
 
 /* Volume: written from main thread, read from i2s thread */
-static volatile uint16_t current_volume_q8 = 256; /* default full volume */
+static volatile uint16_t current_volume_q8 = 0; 
 
 /* File change: written from API, consumed by decode thread */
 static const struct sdcard_audio_info *volatile pending_info;
@@ -207,7 +207,7 @@ static int16_t fill_pcm_buf(int16_t *buf)
 static int open_mp3(const struct sdcard_audio_info *info)
 {
 	uint32_t t_start = k_uptime_ticks();
-	uint32_t t_close, t_open, t_seek;
+	uint32_t t_close, t_open, t_seek, t_read;
 
 	if (file_open) {
 		fs_close(&cur_file);
@@ -257,12 +257,16 @@ static int open_mp3(const struct sdcard_audio_info *info)
 	mp3_buf_len = 0;
 	mp3_clear_bit_reservoir();
 
-	LOG_INF("open_mp3 %s: close=%u us, open=%u us, seek=%u us, total=%u us",
+	mp3_buf_fill();
+	t_read = k_uptime_ticks();
+
+	LOG_INF("open_mp3 %s: close=%u us, open=%u us, seek=%u us, read=%u us, total=%u us",
 		info->path,
 		k_ticks_to_us_near32(t_close - t_start),
 		k_ticks_to_us_near32(t_open - t_close),
 		k_ticks_to_us_near32(t_seek - t_open),
-		k_ticks_to_us_near32(t_seek - t_start));
+		k_ticks_to_us_near32(t_read - t_seek),
+		k_ticks_to_us_near32(t_read - t_start));
 
 	return 0;
 }
@@ -303,7 +307,7 @@ static void decode_thread_fn(void *p1, void *p2, void *p3)
 			int pcm_buf_avail = fill_pcm_buf(pcm_buf);
 			uint32_t t_first_decode = k_uptime_ticks();
 
-			k_pipe_reset(&pcm_pipe);
+			// k_pipe_reset(&pcm_pipe);
 
 			size_t bytes = pcm_buf_avail * sizeof(int16_t);
 			int wrote = k_pipe_write(&pcm_pipe, (uint8_t *)pcm_buf,
@@ -345,6 +349,9 @@ static void i2s_thread_fn(void *p1, void *p2, void *p3)
 
 	int queued = 0;
 
+	int volume = 0;
+	uint32_t gain_q16 = 0;
+
 	while (true) {
 		int32_t *buf;
 		int rc = k_mem_slab_alloc(&i2s_mem_slab, (void **)&buf, K_MSEC(1000));
@@ -355,13 +362,17 @@ static void i2s_thread_fn(void *p1, void *p2, void *p3)
 
 		static int16_t interbuf[BLOCK_SIZE / sizeof(int32_t)];
 
+		// Limit volume change rate
+		const int vol_rate = 8;
+		volume = volume + CLAMP(current_volume_q8 - volume, -vol_rate, vol_rate);
+		uint32_t gain_q16 = (uint32_t)volume * volume;
+
 		/* Read a full block of stereo int16 samples directly into the I2S buffer.
 		 * Blocks until the decode thread has produced enough data. */
 		int bytes_read = k_pipe_read(&pcm_pipe, (uint8_t *)interbuf, sizeof(interbuf),
 					     queued < PREQUEUE_BLOCKS ? K_FOREVER : K_NO_WAIT);
 		if (bytes_read == sizeof(interbuf)) {
 			/* Apply volume scaling in-place: square for perceptual response */
-			uint32_t gain_q16 = (uint32_t)current_volume_q8 * current_volume_q8;
 			for (size_t i = 0; i < BLOCK_SIZE / sizeof(int32_t); i++) {
 				buf[i] = ((int32_t)interbuf[i] * gain_q16);
 			}
@@ -369,7 +380,7 @@ static void i2s_thread_fn(void *p1, void *p2, void *p3)
 			if (bytes_read < 0) {
 				LOG_ERR("PCM pipe read failed: %d", rc);
 			}
-			memset(buf, 0, sizeof(buf));
+			memset(buf, 0, BLOCK_SIZE);
 		}
 
 		rc = i2s_write(i2s_dev, buf, BLOCK_SIZE);
