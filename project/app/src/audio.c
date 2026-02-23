@@ -10,25 +10,27 @@
 #include <mp3common.h>
 
 #include "audio.h"
+#include "zephyr/random/random.h"
+#include "libhelix-mp3/pub/mp3common.h"
 
 LOG_MODULE_REGISTER(audio, CONFIG_APP_LOG_LEVEL);
 
-#define BLOCK_SIZE        (4096 * 2)
-#define BLOCK_COUNT       16
+#define BLOCK_SIZE        (4096)
+#define BLOCK_COUNT       3
 #define DECODE_STACK_SIZE (4096 * 2)
-#define I2S_STACK_SIZE    4096
-#define DECODE_PRIO       6
-#define I2S_PRIO          5
-#define PREQUEUE_BLOCKS   4
+#define I2S_STACK_SIZE    (4096)
+#define DECODE_PRIO       (K_HIGHEST_APPLICATION_THREAD_PRIO + 1)
+#define I2S_PRIO          K_HIGHEST_APPLICATION_THREAD_PRIO
+#define PREQUEUE_BLOCKS   2
 
 /* MP3 input buffer: large enough to hold >1 full frame (max ~1441 bytes) */
-#define MP3_BUF_SIZE    4096
+#define MP3_BUF_SIZE    8192
 /* PCM decode buffer: one MPEG1 stereo frame = 1152 samples × 2 channels */
-#define PCM_BUF_SAMPLES (2304 * 2)
+#define PCM_BUF_SAMPLES (2304)
 /* PCM pipe: stream of interleaved stereo int16_t pairs, ~4 frames of headroom */
-#define PCM_PIPE_SIZE   (PCM_BUF_SAMPLES * sizeof(int16_t) * 2)
+#define PCM_PIPE_SIZE   (PCM_BUF_SAMPLES * sizeof(int16_t) * 8)
 
-K_MEM_SLAB_DEFINE(i2s_mem_slab, BLOCK_SIZE, BLOCK_COUNT, 4);
+K_MEM_SLAB_DEFINE(i2s_mem_slab, BLOCK_SIZE, BLOCK_COUNT, 8);
 K_PIPE_DEFINE(pcm_pipe, PCM_PIPE_SIZE, 4);
 
 static const struct device *i2s_dev = DEVICE_DT_GET(DT_NODELABEL(i2s));
@@ -46,7 +48,7 @@ static struct fs_file_t cur_file;
 static bool file_open;
 static bool i2s_configured;
 
-static off_t    mp3_data_start;
+static off_t mp3_data_start;
 static uint32_t mp3_total_samples;
 static uint32_t mp3_frame_bytes_num;
 static uint32_t mp3_samplerate;
@@ -55,14 +57,23 @@ static uint32_t mp3_samplerate;
 static uint64_t global_sample_counter;
 
 static HMP3Decoder mp3_dec;
-static uint8_t     mp3_buf[MP3_BUF_SIZE];
-static int         mp3_buf_len;
+static uint8_t mp3_buf[MP3_BUF_SIZE];
+static int mp3_buf_len;
 
 /* --- I2S thread private state --- */
 
 static bool i2s_started;
 
 /* --- Helpers --- */
+
+/* Clear the bit reservoir so stale data from a previous file/position
+ * does not corrupt decoding of the new stream. */
+static void mp3_clear_bit_reservoir(void)
+{
+	MP3DecInfo *dec = (MP3DecInfo *)mp3_dec;
+	memset(dec->mainBuf, 0, MAINBUF_SIZE);
+	dec->mainDataBytes = 0;
+}
 
 static int configure_i2s(uint32_t samplerate, uint16_t channels)
 {
@@ -96,12 +107,9 @@ static int mp3_buf_fill(void)
 		return rc;
 	}
 	if (rc == 0) {
-		/* EOF — discard buffered data and reset decoder to clear the bit
-		 * reservoir before looping. Mixing end-of-file and start-of-file
-		 * data corrupts joint-stereo (MS) decoding independently in L/R. */
-		MP3FreeDecoder(mp3_dec);
-		mp3_dec = MP3InitDecoder();
+		/* EOF — discard stale data and loop with a clean bit reservoir */
 		mp3_buf_len = 0;
+		mp3_clear_bit_reservoir();
 		fs_seek(&cur_file, mp3_data_start, FS_SEEK_SET);
 		rc = fs_read(&cur_file, mp3_buf, MP3_BUF_SIZE);
 		if (rc < 0) {
@@ -116,7 +124,7 @@ static int mp3_buf_fill(void)
 
 /* Decode one MP3 frame into pcm_buf; handles sync search and underflow.
  * Sets pcm_buf_avail to the number of valid int16_t samples produced. */
-static int16_t fill_pcm_buf(int16_t* buf)
+static int16_t fill_pcm_buf(int16_t *buf)
 {
 	int err;
 	int skipped_bytes = 0;
@@ -191,17 +199,21 @@ static int16_t fill_pcm_buf(int16_t* buf)
 	uint32_t elapsed_us = k_ticks_to_us_near32(k_uptime_ticks()) - t0_us;
 	LOG_WRN("fill_pcm_buf: decode failed after 8 attempts in %u us, "
 		"buf_len=%d skipped=%d maindata_uflow=%d indata_uflow=%d other_err=%d",
-		elapsed_us, mp3_buf_len, skipped_bytes,
-		maindata_underflows, indata_underflows, other_errors);
+		elapsed_us, mp3_buf_len, skipped_bytes, maindata_underflows, indata_underflows,
+		other_errors);
 	return 0;
 }
 
 static int open_mp3(const struct sdcard_audio_info *info)
 {
+	uint32_t t_start = k_uptime_ticks();
+	uint32_t t_close, t_open, t_seek;
+
 	if (file_open) {
 		fs_close(&cur_file);
 		file_open = false;
 	}
+	t_close = k_uptime_ticks();
 
 	fs_file_t_init(&cur_file);
 	int rc = fs_open(&cur_file, info->path, FS_O_READ);
@@ -210,15 +222,12 @@ static int open_mp3(const struct sdcard_audio_info *info)
 		return rc;
 	}
 	file_open = true;
+	t_open = k_uptime_ticks();
 
-	mp3_data_start      = info->data_start;
-	mp3_total_samples   = info->total_samples;
+	mp3_data_start = info->data_start;
+	mp3_total_samples = info->total_samples;
 	mp3_frame_bytes_num = info->frame_bytes_num;
-	mp3_samplerate      = info->samplerate;
-
-	LOG_INF("Opened %s: %u Hz, %u ch, ~%u kbps",
-		info->path, info->samplerate, info->channels,
-		info->frame_bytes_num / (144 * 1000));
+	mp3_samplerate = info->samplerate;
 
 	if (!i2s_configured) {
 		rc = configure_i2s(info->samplerate, info->channels);
@@ -232,21 +241,28 @@ static int open_mp3(const struct sdcard_audio_info *info)
 	/* Seek to position matching global_sample_counter */
 	if (mp3_total_samples > 0) {
 		uint32_t seek_sample = (uint32_t)(global_sample_counter % mp3_total_samples);
-		uint32_t seek_frame  = seek_sample / 1152;
+		uint32_t seek_frame = seek_sample / 1152;
 		/* Rounded rational arithmetic: avoids floor-division accumulation error */
-		off_t byte_offset = mp3_data_start +
-			(off_t)(((uint64_t)seek_frame * mp3_frame_bytes_num + mp3_samplerate / 2)
-				/ mp3_samplerate);
+		off_t byte_offset =
+			mp3_data_start +
+			(off_t)(((uint64_t)seek_frame * mp3_frame_bytes_num + mp3_samplerate / 2) /
+				mp3_samplerate);
 		fs_seek(&cur_file, byte_offset, FS_SEEK_SET);
-		LOG_INF("Seeked to frame %u (byte %lld)", seek_frame, (long long)byte_offset);
 	} else {
 		fs_seek(&cur_file, mp3_data_start, FS_SEEK_SET);
 	}
+	t_seek = k_uptime_ticks();
 
-	/* Reset decoder state (clears bit reservoir) */
-	MP3FreeDecoder(mp3_dec);
-	mp3_dec = MP3InitDecoder();
-	mp3_buf_len   = 0;
+	/* Discard stale compressed data and clear the bit reservoir */
+	mp3_buf_len = 0;
+	mp3_clear_bit_reservoir();
+
+	LOG_INF("open_mp3 %s: close=%u us, open=%u us, seek=%u us, total=%u us",
+		info->path,
+		k_ticks_to_us_near32(t_close - t_start),
+		k_ticks_to_us_near32(t_open - t_close),
+		k_ticks_to_us_near32(t_seek - t_open),
+		k_ticks_to_us_near32(t_seek - t_start));
 
 	return 0;
 }
@@ -257,7 +273,9 @@ static void decode_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
-	static int16_t     pcm_buf[PCM_BUF_SAMPLES];
+	global_sample_counter = sys_rand32_get();
+
+	static int16_t pcm_buf[PCM_BUF_SAMPLES];
 
 	/* Wait for first file */
 	k_sem_take(&file_change_sem, K_FOREVER);
@@ -273,23 +291,43 @@ static void decode_thread_fn(void *p1, void *p2, void *p3)
 	while (true) {
 		/* Check for file change (non-blocking) */
 		if (k_sem_take(&file_change_sem, K_NO_WAIT) == 0) {
+			uint32_t t_switch_start = k_uptime_ticks();
+
 			info = pending_info;
 			pending_info = NULL;
 			if (open_mp3(info) < 0) {
 				LOG_ERR("Failed to switch file, continuing");
 			}
+			uint32_t t_opened = k_uptime_ticks();
+
+			int pcm_buf_avail = fill_pcm_buf(pcm_buf);
+			uint32_t t_first_decode = k_uptime_ticks();
+
+			k_pipe_reset(&pcm_pipe);
+
+			size_t bytes = pcm_buf_avail * sizeof(int16_t);
+			int wrote = k_pipe_write(&pcm_pipe, (uint8_t *)pcm_buf,
+						 bytes, K_FOREVER);
+			if (wrote != bytes) {
+				LOG_WRN("Wrote wrong number of bytes: %d != %d",
+					wrote, (int)bytes);
+			}
+			global_sample_counter += pcm_buf_avail / 2;
+
+			LOG_INF("file switch: open=%u us, first_decode=%u us, total=%u us",
+				k_ticks_to_us_near32(t_opened - t_switch_start),
+				k_ticks_to_us_near32(t_first_decode - t_opened),
+				k_ticks_to_us_near32(k_uptime_ticks() - t_switch_start));
 			continue;
 		}
 
 		int pcm_buf_avail = fill_pcm_buf(pcm_buf);
 
 		size_t bytes = pcm_buf_avail * sizeof(int16_t);
-		int wrote = k_pipe_write(&pcm_pipe, (uint8_t*)pcm_buf, bytes, K_FOREVER);
+		int wrote = k_pipe_write(&pcm_pipe, (uint8_t *)pcm_buf, bytes, K_FOREVER);
 		if (wrote != bytes) {
-			LOG_WRN("Wrote wrong number of bytes: %d != bytes", wrote, bytes);
+			LOG_WRN("Wrote wrong number of bytes: %d != %d", wrote, bytes);
 		}
-
-
 
 		/* Track decoded samples per channel for seek-on-switch.
 		 * pcm_buf_avail is total interleaved int16_t (L+R), so /2 per channel. */
@@ -309,7 +347,7 @@ static void i2s_thread_fn(void *p1, void *p2, void *p3)
 
 	while (true) {
 		int32_t *buf;
-		int rc = k_mem_slab_alloc(&i2s_mem_slab, (void**) &buf, K_MSEC(1000));
+		int rc = k_mem_slab_alloc(&i2s_mem_slab, (void **)&buf, K_MSEC(1000));
 		if (rc < 0) {
 			LOG_ERR("Buffer alloc failed: %d", rc);
 			continue;
@@ -319,19 +357,19 @@ static void i2s_thread_fn(void *p1, void *p2, void *p3)
 
 		/* Read a full block of stereo int16 samples directly into the I2S buffer.
 		 * Blocks until the decode thread has produced enough data. */
-		int bytes_read = k_pipe_read(&pcm_pipe, (uint8_t*)interbuf, sizeof(interbuf), K_FOREVER);
-		if (bytes_read < 0) {
-			k_mem_slab_free(&i2s_mem_slab, buf);
-			LOG_ERR("PCM pipe read failed: %d", rc);
-			continue;
-		} else if (bytes_read != sizeof(interbuf)) {
-			LOG_ERR("Wrong sample count, %d != %d", bytes_read, sizeof(interbuf));
-		}
-
-		/* Apply volume scaling in-place: square for perceptual response */
-		uint32_t gain_q16 = (uint32_t)current_volume_q8 * current_volume_q8;
-		for (size_t i = 0; i < BLOCK_SIZE / sizeof(int32_t); i++) {
-			buf[i] = ((int32_t)interbuf[i] * gain_q16);
+		int bytes_read = k_pipe_read(&pcm_pipe, (uint8_t *)interbuf, sizeof(interbuf),
+					     queued < PREQUEUE_BLOCKS ? K_FOREVER : K_NO_WAIT);
+		if (bytes_read == sizeof(interbuf)) {
+			/* Apply volume scaling in-place: square for perceptual response */
+			uint32_t gain_q16 = (uint32_t)current_volume_q8 * current_volume_q8;
+			for (size_t i = 0; i < BLOCK_SIZE / sizeof(int32_t); i++) {
+				buf[i] = ((int32_t)interbuf[i] * gain_q16);
+			}
+		} else {
+			if (bytes_read < 0) {
+				LOG_ERR("PCM pipe read failed: %d", rc);
+			}
+			memset(buf, 0, sizeof(buf));
 		}
 
 		rc = i2s_write(i2s_dev, buf, BLOCK_SIZE);
@@ -383,15 +421,12 @@ int audio_init(void)
 	k_sem_init(&file_change_sem, 0, 1);
 
 	k_thread_create(&decode_thread_data, decode_thread_stack,
-			K_THREAD_STACK_SIZEOF(decode_thread_stack),
-			decode_thread_fn, NULL, NULL, NULL,
-			DECODE_PRIO, 0, K_NO_WAIT);
+			K_THREAD_STACK_SIZEOF(decode_thread_stack), decode_thread_fn, NULL, NULL,
+			NULL, DECODE_PRIO, 0, K_NO_WAIT);
 	k_thread_name_set(&decode_thread_data, "mp3_decode");
 
-	k_thread_create(&i2s_thread_data, i2s_thread_stack,
-			K_THREAD_STACK_SIZEOF(i2s_thread_stack),
-			i2s_thread_fn, NULL, NULL, NULL,
-			I2S_PRIO, 0, K_NO_WAIT);
+	k_thread_create(&i2s_thread_data, i2s_thread_stack, K_THREAD_STACK_SIZEOF(i2s_thread_stack),
+			i2s_thread_fn, NULL, NULL, NULL, I2S_PRIO, 0, K_NO_WAIT);
 	k_thread_name_set(&i2s_thread_data, "i2s_out");
 
 	LOG_INF("Audio initialized");

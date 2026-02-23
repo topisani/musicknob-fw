@@ -84,6 +84,9 @@
 };
 
 &spi2 {
+	dmas = <&dma 0>, <&dma 1>;
+	dma-names = "tx", "rx";
+
 	sdhc0: sdhc@0 {
 		compatible = "zephyr,sdhc-spi-slot";
 		reg = <0>;

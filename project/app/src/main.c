@@ -62,7 +62,6 @@ int main(void)
 	int last_position = 0;
 
 	while (true) {
-		k_msleep(10);
 
 		audio_set_volume(read_volume_q8());
 
@@ -91,6 +90,7 @@ int main(void)
 			audio_set_file(info);
 			last_position = position;
 		}
+		k_msleep(10);
 	}
 
 	return 0;

@@ -7,10 +7,12 @@ export BOARD := env("BOARD", "esp32c6_supermini/esp32c6/hpcore")
 export BUILD_TYPE := env("BUILD_TYPE", "Debug")
 
 export SYSBUILD := env("SYSBUILD", "false")
-export WEST_RUNNER := env("WEST_RUNNER", "esp32")
+export WEST_RUNNER := env("WEST_RUNNER", "")
 export WEST_RUNNER_ARGS := env("WEST_RUNNER_ARGS", "")
 export BUILD_DIR := env("BUILD_DIR", "build/" + BOARD)
 export BUILD_ARGS := env("BUILD_ARGS", "")
+
+runner_args := if WEST_RUNNER != "" { "-r " + WEST_RUNNER } else { "" }
 
 [private]
 @default:
@@ -30,7 +32,7 @@ clean:
 
 # Flash from within the docker image
 flash *args:
-    just west flash -d {{BUILD_DIR}} -r {{ WEST_RUNNER }} {{ WEST_RUNNER_ARGS }} "$@"
+    just west flash -d {{BUILD_DIR}} {{ runner_args }} {{ WEST_RUNNER_ARGS }} "$@"
 
 # Run west from the virtual environment
 west *args:
@@ -39,11 +41,11 @@ west *args:
     . .venv/bin/activate && west "$@"
 
 debug *args:
-    just west debug -d {{BUILD_DIR}} -r {{ WEST_RUNNER }} {{ WEST_RUNNER_ARGS }} "$@"
+    just west debug -d {{BUILD_DIR}} {{ runner_args }} {{ WEST_RUNNER_ARGS }} "$@"
 
 
 rtt *args:
-    just west rtt -r {{ WEST_RUNNER }} {{ WEST_RUNNER_ARGS }} "$@"
+    just west rtt {{ runner_args }} {{ WEST_RUNNER_ARGS }} "$@"
 
 # Initialize the zephyr workspace
 init:
