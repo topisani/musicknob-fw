@@ -33,9 +33,9 @@ int main(void)
 	sdcard_init();
 	audio_init();
 
-	int file_count = sdcard_get_wav_count();
+	int file_count = sdcard_get_audio_count();
 	if (file_count > 0) {
-		audio_set_file(sdcard_get_wav_info(0));
+		audio_set_file(sdcard_get_audio_info(0));
 	}
 
 	if (!adc_is_ready_dt(&volume_adc)) {
@@ -62,7 +62,7 @@ int main(void)
 	int last_position = 0;
 
 	while (true) {
-		k_msleep(10);
+		k_msleep(1000);
 
 		audio_set_volume(read_volume_q8());
 
@@ -86,7 +86,7 @@ int main(void)
 		position = (ENC_STEP_COUNT - position) % ENC_STEP_COUNT;
 		if (position != last_position) {
 			int i = position % file_count;
-			const struct sdcard_wav_info *info = sdcard_get_wav_info(i);
+			const struct sdcard_audio_info *info = sdcard_get_audio_info(i);
 			LOG_INF("position %d, File %d: %s", position, i, info->path);
 			audio_set_file(info);
 			last_position = position;

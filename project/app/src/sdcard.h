@@ -2,17 +2,15 @@
 
 #include <zephyr/fs/fs.h>
 
-struct sdcard_wav_info {
+struct sdcard_audio_info {
 	char     path[64];
 	uint32_t samplerate;
 	uint16_t channels;
-	uint16_t bitdepth;
-	uint16_t framesize;   /* bytes per frame = channels * bitdepth/8 */
-	uint32_t nframes;
-	uint32_t data_size;
-	off_t    data_start;  /* byte offset of first PCM sample in file */
+	uint32_t total_samples;   /* total PCM samples (for modulo seeking) */
+	off_t    data_start;      /* byte offset of first MP3 frame (after ID3) */
+	uint32_t frame_bytes_num; /* 144 * bitrate_bps — numerator for rational seek arithmetic */
 };
 
 int sdcard_init(void);
-int sdcard_get_wav_count(void);
-const struct sdcard_wav_info *sdcard_get_wav_info(int index);
+int sdcard_get_audio_count(void);
+const struct sdcard_audio_info *sdcard_get_audio_info(int index);
