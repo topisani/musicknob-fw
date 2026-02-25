@@ -12,6 +12,7 @@ target_sources(app PRIVATE
     src/main.c
     src/sdcard.c
     src/audio.c
+    src/mp3.c
     src/libhelix-mp3/mp3dec.c
     src/libhelix-mp3/mp3tabs.c
     src/libhelix-mp3/real/bitstream.c

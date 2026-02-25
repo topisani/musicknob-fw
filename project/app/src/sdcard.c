@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "sdcard.h"
+#include "mp3.h"
 
 LOG_MODULE_REGISTER(sdcard, CONFIG_APP_LOG_LEVEL);
 
@@ -14,14 +15,6 @@ static int audio_file_count;
 
 #define AUTOMOUNT_NODE DT_NODELABEL(ffs1)
 FS_FSTAB_DECLARE_ENTRY(AUTOMOUNT_NODE);
-
-/* MP3 bitrate table (kbps) indexed by bitrate_index (1..14), MPEG1 Layer3 */
-static const uint32_t mp3_bitrate_table[16] = {
-	0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0
-};
-
-/* MP3 samplerate table indexed by samplerate_index (0..2), MPEG1 */
-static const uint32_t mp3_samplerate_table[4] = {44100, 48000, 32000, 0};
 
 static bool has_mp3_ext(const char *name)
 {
@@ -36,111 +29,7 @@ static bool has_mp3_ext(const char *name)
 	       (ext[3] == '3' || ext[3] == '3');
 }
 
-/* Decode ID3v2 syncsafe size (4 bytes, 7 bits each) */
-static uint32_t id3_syncsafe(const uint8_t *b)
-{
-	return ((uint32_t)b[0] << 21) |
-	       ((uint32_t)b[1] << 14) |
-	       ((uint32_t)b[2] << 7)  |
-	       ((uint32_t)b[3]);
-}
-
-static int populate_mp3_info(struct sdcard_audio_info *info)
-{
-	struct fs_file_t *f = &info->file;
-	struct fs_dirent stat;
-	uint8_t hdr[10];
-	off_t data_start = 0;
-	int rc;
-
-	/* Read first 10 bytes to check for ID3v2 tag */
-	rc = fs_read(f, hdr, 10);
-	if (rc < 10) {
-		return -EINVAL;
-	}
-
-	if (hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == '3') {
-		/* ID3v2 tag present: skip it */
-		uint32_t tag_size = id3_syncsafe(&hdr[6]);
-		data_start = 10 + (off_t)tag_size;
-		/* Check for extended footer (bit 4 of flags byte) */
-		if (hdr[5] & 0x10) {
-			data_start += 10;
-		}
-	}
-
-	/* Seek to first MP3 frame */
-	rc = fs_seek(f, data_start, FS_SEEK_SET);
-	if (rc < 0) {
-		return -EINVAL;
-	}
-
-	/* Read 4-byte frame header */
-	uint8_t fh[4];
-	rc = fs_read(f, fh, 4);
-	if (rc < 4) {
-		return -EINVAL;
-	}
-
-	/* Validate sync word (0xFFE0 = sync bits for MPEG audio) */
-	if ((fh[0] != 0xFF) || ((fh[1] & 0xE0) != 0xE0)) {
-		return -EINVAL;
-	}
-
-	/* MPEG version: bits 4-3 of byte 1; 0b11 = MPEG1 */
-	uint8_t mpeg_version = (fh[1] >> 3) & 0x3;
-	if (mpeg_version != 3) {
-		/* Only MPEG1 supported */
-		return -EINVAL;
-	}
-
-	/* Layer: bits 2-1 of byte 1; 0b01 = Layer3 */
-	uint8_t layer = (fh[1] >> 1) & 0x3;
-	if (layer != 1) {
-		return -EINVAL;
-	}
-
-	/* Bitrate index: bits 7-4 of byte 2 */
-	uint8_t br_idx = (fh[2] >> 4) & 0xF;
-	if (br_idx == 0 || br_idx == 15) {
-		return -EINVAL; /* free or bad */
-	}
-	uint32_t bitrate_bps = mp3_bitrate_table[br_idx] * 1000;
-
-	/* Samplerate index: bits 3-2 of byte 2 */
-	uint8_t sr_idx = (fh[2] >> 2) & 0x3;
-	uint32_t samplerate = mp3_samplerate_table[sr_idx];
-	if (samplerate == 0) {
-		return -EINVAL;
-	}
-
-	/* Channel mode: bits 7-6 of byte 3; 3 = mono */
-	uint8_t channel_mode = (fh[3] >> 6) & 0x3;
-	uint16_t channels = (channel_mode == 3) ? 1 : 2;
-
-	uint32_t avg_frame_bytes = (144 * bitrate_bps) / samplerate;
-	uint32_t frame_bytes_num = 144 * bitrate_bps;
-
-	/* Estimate total samples from file size */
-	rc = fs_stat(info->path, &stat);
-	if (rc < 0) {
-		return rc;
-	}
-
-	uint32_t audio_bytes = (uint32_t)(stat.size - data_start);
-	uint32_t total_frames = audio_bytes / avg_frame_bytes;
-	uint32_t total_samples = total_frames * 1152; /* 1152 samples/frame for MPEG1 */
-
-	info->samplerate      = samplerate;
-	info->channels        = channels;
-	info->total_samples   = total_samples;
-	info->data_start      = data_start;
-	info->frame_bytes_num = frame_bytes_num;
-
-	return 0;
-}
-
-static void enumerate_mp3_files(const char *path)
+static void enumerate_audio_files(const char *path)
 {
 	struct fs_dir_t dir;
 	struct fs_dirent entry;
@@ -180,7 +69,7 @@ static void enumerate_mp3_files(const char *path)
 			continue;
 		}
 
-		if (populate_mp3_info(info) == 0) {
+		if (mp3_parse_header(info) == 0) {
 			uint32_t duration_s = info->total_samples / info->samplerate;
 			LOG_INF("%s: %u Hz, %u ch, %u kbps, %u:%02u",
 				entry.name,
@@ -225,7 +114,7 @@ int sdcard_init(void)
 		mp->mnt_point,
 		(unsigned long)stat.f_bfree * stat.f_frsize / 1024);
 
-	enumerate_mp3_files(mp->mnt_point);
+	enumerate_audio_files(mp->mnt_point);
 	return 0;
 }
 

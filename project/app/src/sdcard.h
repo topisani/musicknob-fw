@@ -10,6 +10,7 @@ struct sdcard_audio_info {
 	uint32_t       total_samples;   /* total PCM samples (for modulo seeking) */
 	off_t          data_start;      /* byte offset of first MP3 frame (after ID3) */
 	uint32_t       frame_bytes_num; /* 144 * bitrate_bps — numerator for rational seek arithmetic */
+	uint32_t       rg_multiplier_q16;  /* ReplayGain as Q16 linear multiplier */
 };
 
 int sdcard_init(void);
