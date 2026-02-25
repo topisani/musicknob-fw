@@ -45,24 +45,18 @@ static uint32_t id3_syncsafe(const uint8_t *b)
 	       ((uint32_t)b[3]);
 }
 
-static int read_mp3_info(const char *path, struct sdcard_audio_info *info)
+static int populate_mp3_info(struct sdcard_audio_info *info)
 {
-	struct fs_file_t f;
+	struct fs_file_t *f = &info->file;
 	struct fs_dirent stat;
 	uint8_t hdr[10];
 	off_t data_start = 0;
 	int rc;
 
-	fs_file_t_init(&f);
-	rc = fs_open(&f, path, FS_O_READ);
-	if (rc < 0) {
-		return rc;
-	}
-
 	/* Read first 10 bytes to check for ID3v2 tag */
-	rc = fs_read(&f, hdr, 10);
+	rc = fs_read(f, hdr, 10);
 	if (rc < 10) {
-		goto err;
+		return -EINVAL;
 	}
 
 	if (hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == '3') {
@@ -76,40 +70,40 @@ static int read_mp3_info(const char *path, struct sdcard_audio_info *info)
 	}
 
 	/* Seek to first MP3 frame */
-	rc = fs_seek(&f, data_start, FS_SEEK_SET);
+	rc = fs_seek(f, data_start, FS_SEEK_SET);
 	if (rc < 0) {
-		goto err;
+		return -EINVAL;
 	}
 
 	/* Read 4-byte frame header */
 	uint8_t fh[4];
-	rc = fs_read(&f, fh, 4);
+	rc = fs_read(f, fh, 4);
 	if (rc < 4) {
-		goto err;
+		return -EINVAL;
 	}
 
 	/* Validate sync word (0xFFE0 = sync bits for MPEG audio) */
 	if ((fh[0] != 0xFF) || ((fh[1] & 0xE0) != 0xE0)) {
-		goto err;
+		return -EINVAL;
 	}
 
 	/* MPEG version: bits 4-3 of byte 1; 0b11 = MPEG1 */
 	uint8_t mpeg_version = (fh[1] >> 3) & 0x3;
 	if (mpeg_version != 3) {
 		/* Only MPEG1 supported */
-		goto err;
+		return -EINVAL;
 	}
 
 	/* Layer: bits 2-1 of byte 1; 0b01 = Layer3 */
 	uint8_t layer = (fh[1] >> 1) & 0x3;
 	if (layer != 1) {
-		goto err;
+		return -EINVAL;
 	}
 
 	/* Bitrate index: bits 7-4 of byte 2 */
 	uint8_t br_idx = (fh[2] >> 4) & 0xF;
 	if (br_idx == 0 || br_idx == 15) {
-		goto err; /* free or bad */
+		return -EINVAL; /* free or bad */
 	}
 	uint32_t bitrate_bps = mp3_bitrate_table[br_idx] * 1000;
 
@@ -117,7 +111,7 @@ static int read_mp3_info(const char *path, struct sdcard_audio_info *info)
 	uint8_t sr_idx = (fh[2] >> 2) & 0x3;
 	uint32_t samplerate = mp3_samplerate_table[sr_idx];
 	if (samplerate == 0) {
-		goto err;
+		return -EINVAL;
 	}
 
 	/* Channel mode: bits 7-6 of byte 3; 3 = mono */
@@ -128,8 +122,7 @@ static int read_mp3_info(const char *path, struct sdcard_audio_info *info)
 	uint32_t frame_bytes_num = 144 * bitrate_bps;
 
 	/* Estimate total samples from file size */
-	fs_close(&f);
-	rc = fs_stat(path, &stat);
+	rc = fs_stat(info->path, &stat);
 	if (rc < 0) {
 		return rc;
 	}
@@ -145,10 +138,6 @@ static int read_mp3_info(const char *path, struct sdcard_audio_info *info)
 	info->frame_bytes_num = frame_bytes_num;
 
 	return 0;
-
-err:
-	fs_close(&f);
-	return -EINVAL;
 }
 
 static void enumerate_mp3_files(const char *path)
@@ -184,7 +173,14 @@ static void enumerate_mp3_files(const char *path)
 		strncpy(info->path, filepath, sizeof(info->path) - 1);
 		info->path[sizeof(info->path) - 1] = '\0';
 
-		if (read_mp3_info(filepath, info) == 0) {
+		fs_file_t_init(&info->file);
+		int rc = fs_open(&info->file, filepath, FS_O_READ);
+		if (rc < 0) {
+			LOG_ERR("%s: failed to open: %d", entry.name, rc);
+			continue;
+		}
+
+		if (populate_mp3_info(info) == 0) {
 			uint32_t duration_s = info->total_samples / info->samplerate;
 			LOG_INF("%s: %u Hz, %u ch, %u kbps, %u:%02u",
 				entry.name,
@@ -193,11 +189,12 @@ static void enumerate_mp3_files(const char *path)
 				info->frame_bytes_num / (144 * 1000),
 				duration_s / 60,
 				duration_s % 60);
-			audio_file_count++;
 		} else {
-			audio_file_count++;
 			LOG_WRN("%s: failed to parse MP3 header", entry.name);
 		}
+
+		fs_seek(&info->file, info->data_start, FS_SEEK_SET);
+		audio_file_count++;
 	}
 
 	fs_closedir(&dir);
@@ -237,7 +234,7 @@ int sdcard_get_audio_count(void)
 	return audio_file_count;
 }
 
-const struct sdcard_audio_info *sdcard_get_audio_info(int index)
+struct sdcard_audio_info *sdcard_get_audio_info(int index)
 {
 	if (index < 0 || index >= audio_file_count) {
 		return NULL;

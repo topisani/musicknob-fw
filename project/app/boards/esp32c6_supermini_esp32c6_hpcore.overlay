@@ -3,6 +3,11 @@
  */
 
 / {
+	chosen {
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+	};
+
 	aliases {
 		qdec0 = &pcnt;
 	};
@@ -81,6 +86,10 @@
 			ctrl-l-mode = <1>;
 		};
 	};
+};
+
+&usb_serial {
+	status = "okay";
 };
 
 &spi2 {

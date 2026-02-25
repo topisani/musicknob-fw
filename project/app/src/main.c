@@ -86,7 +86,7 @@ int main(void)
 		// position = (ENC_STEP_COUNT - position) % ENC_STEP_COUNT;
 		if (position != last_position) {
 			int i = position % file_count;
-			const struct sdcard_audio_info *info = sdcard_get_audio_info(i);
+			struct sdcard_audio_info *info = sdcard_get_audio_info(i);
 			LOG_INF("position %d, File %d: %s", position, i, info->path);
 			audio_set_file(info);
 			last_position = position;
