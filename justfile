@@ -3,7 +3,7 @@ set dotenv-load := true
 
 # These need to be set in a local .env file. see example.env
 export APP := env("APP", "project/app")
-export BOARD := env("BOARD", "esp32c6_supermini/esp32c6/hpcore")
+export BOARD := env("BOARD", "esp32c3_supermini/esp32c3")
 export BUILD_TYPE := env("BUILD_TYPE", "Debug")
 
 export SYSBUILD := env("SYSBUILD", "false")
