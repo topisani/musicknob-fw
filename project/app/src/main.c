@@ -11,22 +11,12 @@ LOG_MODULE_REGISTER(app, CONFIG_APP_LOG_LEVEL);
 
 #define ENC_STEP_COUNT 100
 
-static int last_position = 0;
+static int position = 0;
 static int file_count = 0;
 
-static void on_encoder_position(int position)
+static void on_encoder_position(int p)
 {
-	if (file_count <= 0) {
-		return;
-	}
-	// int position = (((raw_val / 2) % ENC_STEP_COUNT) + ENC_STEP_COUNT) % ENC_STEP_COUNT;
-	if (position != last_position) {
-		last_position = position;
-		int i = position % file_count;
-		struct sdcard_audio_info *info = sdcard_get_audio_info(i);
-		LOG_INF("position %d, File %d: %s", position, i, info->path);
-		audio_set_file(info);
-	}
+	position = p;
 }
 
 #if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), io_channels)
@@ -95,9 +85,44 @@ int main(void)
 	}
 #endif
 
+	int last_position = -1;
+	bool idle = false;
+	int64_t zero_vol_since = 0;
+
 	while (true) {
-		k_msleep(10);
-		audio_set_volume(read_volume_q8());
+		k_msleep(idle ? 1000 : 10);
+
+		uint16_t vol = read_volume_q8();
+		audio_set_volume(vol);
+
+		if (!idle) {
+			/* Track how long volume has been zero */
+			if (vol == 0) {
+				if (zero_vol_since == 0) {
+					zero_vol_since = k_uptime_get();
+				} else if (k_uptime_get() - zero_vol_since >= 5000) {
+					audio_stop();
+					idle = true;
+					LOG_INF("Entering idle mode");
+					continue;
+				}
+			} else {
+				zero_vol_since = 0;
+			}
+		} else {
+			/* Idle: check if volume came back */
+			if (vol > 0) {
+				idle = false;
+				zero_vol_since = 0;
+				audio_start();
+				/* Re-select current file */
+				if (file_count > 0 && last_position >= 0) {
+					int i = last_position % file_count;
+					audio_set_file(sdcard_get_audio_info(i));
+				}
+				LOG_INF("Leaving idle mode");
+			}
+		}
 
 #if DT_HAS_ALIAS(qdec0)
 		int enc_rc = sensor_sample_fetch(qdec);
@@ -114,8 +139,24 @@ int main(void)
 			return 0;
 		}
 
-		on_encoder_position(val.val1);
+ 		int p =
+ 			(((val.val1 / 2) % ENC_STEP_COUNT) + ENC_STEP_COUNT) % ENC_STEP_COUNT;
+		on_encoder_position(p);
 #endif /* DT_HAS_ALIAS(qdec0) */
+
+ 		if (file_count <= 0) {
+ 			continue;
+ 		}
+ 
+ 		if (position != last_position) {
+ 			last_position = position;
+			if (!idle) {
+				int i = position % file_count;
+				struct sdcard_audio_info *info = sdcard_get_audio_info(i);
+				LOG_INF("position %d, File %d: %s", position, i, info->path);
+				audio_set_file(info);
+			}
+ 		}
 	}
 
 	return 0;

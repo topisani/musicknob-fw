@@ -38,9 +38,11 @@ static struct k_sem file_change_sem;
 /* Synchronized playback position (stereo samples per channel pushed into pipe) */
 static uint64_t global_sample_counter;
 
-/* --- I2S thread private state --- */
+/* --- Shared state --- */
 
 static bool i2s_started;
+static bool stopped;
+static int queued;
 
 /* --- Helpers --- */
 
@@ -143,8 +145,6 @@ static void i2s_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
-
-	int queued = 0;
 
 	int volume = 0;
 	uint32_t gain_q16 = 0;
@@ -251,4 +251,38 @@ int audio_set_file(struct sdcard_audio_info *info)
 void audio_set_volume(uint16_t volume_q8)
 {
 	current_volume_q8 = volume_q8;
+}
+
+void audio_stop(void)
+{
+	stopped = true;
+	k_thread_suspend(&decode_thread_data);
+	k_thread_suspend(&i2s_thread_data);
+	i2s_trigger(i2s_dev, I2S_DIR_TX, I2S_TRIGGER_DROP);
+	i2s_started = false;
+
+	/* Flush the PCM pipe */
+	uint8_t trash[256];
+	while (k_pipe_read(&pcm_pipe, trash, sizeof(trash), K_NO_WAIT) > 0) {
+	}
+
+	LOG_INF("Audio stopped");
+}
+
+void audio_start(void)
+{
+	stopped = false;
+
+	/* Re-configure I2S after DROP */
+	configure_i2s();
+
+	/* Flush pipe and reset I2S state */
+	k_pipe_reset(&pcm_pipe);
+	i2s_started = false;
+	queued = 0;
+
+	k_thread_resume(&decode_thread_data);
+	k_thread_resume(&i2s_thread_data);
+
+	LOG_INF("Audio started");
 }
