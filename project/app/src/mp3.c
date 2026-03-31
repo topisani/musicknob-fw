@@ -374,10 +374,10 @@ int16_t mp3_decode_frame(int16_t *buf)
 			uint32_t elapsed_us = k_ticks_to_us_near32(k_uptime_ticks()) - t0_us;
 			if (skipped_bytes || maindata_underflows || indata_underflows ||
 			    other_errors || elapsed_us > 10000) {
-				LOG_WRN("mp3_decode_frame: %u us, skipped=%d maindata_uflow=%d "
-					"indata_uflow=%d other_err=%d samps=%d",
-					elapsed_us, skipped_bytes, maindata_underflows,
-					indata_underflows, other_errors, fi.outputSamps);
+				// LOG_WRN("mp3_decode_frame: %u us, skipped=%d maindata_uflow=%d "
+				// 	"indata_uflow=%d other_err=%d samps=%d",
+				// 	elapsed_us, skipped_bytes, maindata_underflows,
+				// 	indata_underflows, other_errors, fi.outputSamps);
 			}
 			return fi.outputSamps;
 		} else if (err == ERR_MP3_MAINDATA_UNDERFLOW) {

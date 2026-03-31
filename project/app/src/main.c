@@ -138,24 +138,21 @@ int main(void)
 			LOG_INF("Failed to get data (%d)", enc_rc);
 			return 0;
 		}
+		int p = (((val.val1 / 2) % ENC_STEP_COUNT) + ENC_STEP_COUNT) % ENC_STEP_COUNT;
 
- 		int p =
- 			(((val.val1 / 2) % ENC_STEP_COUNT) + ENC_STEP_COUNT) % ENC_STEP_COUNT;
 		on_encoder_position(p);
 #endif /* DT_HAS_ALIAS(qdec0) */
 
  		if (file_count <= 0) {
  			continue;
  		}
- 
+
  		if (position != last_position) {
+			int i = position % file_count;
+			struct sdcard_audio_info *info = sdcard_get_audio_info(i);
+			LOG_INF("position %d, File %d: %s", position, i, info->path);
+			audio_set_file(info);
  			last_position = position;
-			if (!idle) {
-				int i = position % file_count;
-				struct sdcard_audio_info *info = sdcard_get_audio_info(i);
-				LOG_INF("position %d, File %d: %s", position, i, info->path);
-				audio_set_file(info);
-			}
  		}
 	}
 
